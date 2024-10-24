@@ -305,7 +305,7 @@ def split_file(path, section_size, nest, compress, delete_original):
         delete_paths(path)
 
 
-def stitch_files(paths, keep_sections):
+def stitch_files(paths, keep_sections, keep_dirs):
     if not paths:
         paths = [Path(".")]
         implicit = True
@@ -454,7 +454,7 @@ def stitch_files(paths, keep_sections):
             delete_paths(*st.sections.values())
 
     # bit hacked in but if the stitching cleared out any directories remove them.
-    if not keep_sections:
+    if not keep_sections and not keep_dirs:
         for path in dirpaths:
             if not any(path.iterdir()):
                 path.rmdir()
@@ -512,6 +512,9 @@ def main():
     group_stitch.add_argument("-k", "--keep-sections", action="store_true",
             help="keep section files after stitching")
 
+    group_stitch.add_argument("--keep-dirs", action="store_true",
+            help="keep empty directories after stitching")
+
 
     group_split = parser.add_argument_group("when splitting")
 
@@ -568,7 +571,8 @@ def main():
             split_file(path, section_size=args.size, nest=args.nest,
                     compress=not args.fast, delete_original=args.replace)
     else:
-        stitch_files(args.files, keep_sections=args.keep_sections)
+        stitch_files(args.files, keep_sections=args.keep_sections,
+                keep_dirs=args.keep_dirs)
 
 
 if __name__ == "__main__":
