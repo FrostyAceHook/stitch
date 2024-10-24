@@ -401,9 +401,10 @@ def stitch_files(paths, keep_sections):
     for filename, st in stitches.items():
         # Check for extra files, i.e. files after last.
         extra = []
-        for index, path in st.sections.items():
-            if index >= st.count:
-                extra.append(path)
+        if st.count > 0: # fallthrough to missing check.
+            for index, path in st.sections.items():
+                if index >= st.count:
+                    extra.append(path)
         if extra:
             if not ask(f"unneeded section files for {esc(filename)}, ignore?"):
                 error(f"unneeded sections for: {esc(filename)}, bad sections: "
