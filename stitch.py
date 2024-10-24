@@ -1,10 +1,10 @@
 import argparse
-import os
 import shutil
 import struct
 import sys
 import zlib
 from dataclasses import dataclass
+from pathlib import Path
 
 
 
@@ -31,7 +31,7 @@ def error(msg):
 
 
 def esc(s, /):
-    return "'" + s.replace("'", "''") + "'"
+    return "'" + str(s).replace("'", "''") + "'"
 
 
 
@@ -39,9 +39,9 @@ def delete_paths(*paths):
     exceptions = []
     for path in paths:
         try:
-            if os.path.isfile(path):
-                os.remove(path)
-            elif os.path.isdir(path):
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
                 shutil.rmtree(path)
         except Exception as e:
             exceptions.append((path, str(e)))
@@ -51,11 +51,11 @@ def delete_paths(*paths):
 
 
 def open_for_write(path):
-    if os.path.exists(path):
+    if path.exists():
         if not ask(f"file {esc(path)} already exists, overwrite?"):
             error(f"file already exists at: {esc(path)}")
         delete_paths(path)
-    return open(path, "wb")
+    return path.open("wb")
 
 
 class NoExiste:
@@ -68,14 +68,14 @@ NO_EXISTE = NoExiste()
 def open_for_read(path, ignorable=True, askable=True):
     fine = True
     ignore = False
-    if not os.path.exists(path):
+    if not path.exists():
         fine = False
         if ignorable:
             if askable:
                 ignore = ask(f"file {esc(path)} doesn't exist, ignore?")
             else:
                 ignore = True
-    elif not os.path.isfile(path):
+    elif not path.is_file():
         fine = False
         if ignorable:
             if askable:
@@ -86,15 +86,18 @@ def open_for_read(path, ignorable=True, askable=True):
         if ignore:
             return NO_EXISTE
         error(f"file doesn't exist at: {esc(path)}")
-    return open(path, "rb")
+    return path.open("rb")
 
 
-def create_dir(path):
-    if os.path.exists(path):
+def create_empty_dir(path):
+    # if it already exists and is empty, great success.
+    if path.is_dir() and not any(path.iterdir()):
+        return
+    if path.exists():
         if not ask(f"directory {esc(path)} already exists, overwrite?"):
             error(f"directory already exists at: {esc(path)}")
         shutil.rmtree(path)
-    os.makedirs(path)
+    path.mkdir()
 
 
 
@@ -224,8 +227,9 @@ def dechunkify(file, decompress, get_path):
 
 
 def split_file(path, section_size, nest, compress, delete_original):
-    filename = os.path.basename(path)
+    path = Path(path)
 
+    filename = path.name
     # dont let dir separators slip in.
     filename = filename.replace("/", "")
     filename = filename.replace("\\", "")
@@ -233,32 +237,25 @@ def split_file(path, section_size, nest, compress, delete_original):
     if not filename:
         filename = "file"
 
-    name, _ = os.path.splitext(filename)
-    name = name.replace(" ", "_")
-    nameof = lambda i: f"{name}_{i}{EXT}"
+    stem = path.stem.replace(" ", "_")
+    nameof = lambda i: path.with_name(f"{stem}_{i}{EXT}")
 
     if nest:
         # Create a directory to hold them all.
-        dirname = f"{name}_sections"
-        create_dir(dirname)
+        dirpath = Path(f"{stem}_sections")
+        create_empty_dir(dirpath)
         nnameof = nameof
-        nameof = lambda i: f"{dirname}/{nnameof(i)}"
+        nameof = lambda i: dirpath / nnameof(i)
     else:
         # Otherwise, check that no sections files already exist for this file.
         matching = []
-        parent = os.path.dirname(path)
-        if parent == "":
-            parent = "."
-        for p in os.listdir(parent):
+        for p in Path(".").iterdir():
             try:
-                _, ext = os.path.splitext(p)
-                if ext == EXT:
-                    if parent != ".":
-                        p = os.path.join(parent, p)
-                    with open_for_read(p, askable=False) as f:
-                        if f is NO_EXISTE:
+                if p.suffix == EXT:
+                    with open_for_read(p, askable=False) as file:
+                        if file is NO_EXISTE:
                             continue
-                        buf = f.read(Header.SIZE)
+                        buf = file.read(Header.SIZE)
                         header = Header.read(buf)
                         if header.name == filename:
                             matching.append(p)
@@ -310,41 +307,39 @@ def split_file(path, section_size, nest, compress, delete_original):
 
 def stitch_files(paths, keep_sections):
     if not paths:
-        paths = ["."]
+        paths = [Path(".")]
         implicit = True
     else:
+        paths = [Path(x) for x in paths]
         implicit = False
 
     allpaths = []
     dirpaths = []
     for path in paths:
-        if os.path.isdir(path):
-            subpaths = []
-            for p in os.listdir(path):
-                _, ext = os.path.splitext(p)
-                if path != ".":
-                    p = os.path.join(path, p)
-                if os.path.isfile(p) and ext == EXT:
-                    subpaths.append(p)
-            if implicit:
-                allpaths.extend(subpaths)
-                continue
-            # warn about empty directories (except for an implicit '.')
-            if not subpaths:
-                if not ask(f"directory {esc(path)} contains no section files, "
-                        "ignore?"):
-                    error(f"no sections in directory: {esc(path)}")
-            else:
-                allpaths.extend(subpaths)
-                dirpaths.append(path)
-        else:
+        if not path.is_dir():
             allpaths.append(path)
+
+        subpaths = []
+        for p in path.iterdir():
+            if p.is_file() and p.suffix == EXT:
+                subpaths.append(p)
+        if implicit:
+            allpaths.extend(subpaths)
+            continue
+        # warn about empty directories (except for an implicit '.')
+        if not subpaths:
+            if not ask(f"directory {esc(path)} contains no section files, "
+                    "ignore?"):
+                error(f"no sections in directory: {esc(path)}")
+        else:
+            allpaths.extend(subpaths)
+            dirpaths.append(path)
 
     # ensure uniqueness.
     unique_paths = set()
     paths = []
     for path in allpaths:
-        abspath = os.path.abspath(path)
+        abspath = path.resolve()
         if abspath in unique_paths:
             continue
         unique_paths.add(abspath)
@@ -368,23 +363,24 @@ def stitch_files(paths, keep_sections):
             buf = file.read(Header.SIZE)
             try:
                 header = Header.read(buf)
+                filename = Path(header.name)
 
-                if header.name in stitches:
-                    st = stitches[header.name]
+                if filename in stitches:
+                    st = stitches[filename]
                     if header.comp != st.comp:
                         raise Exception("inconsistent section compression")
                     if header.index in st.sections:
                         raise Exception("duplicate section file")
                     st.sections[header.index] = path
                 else:
-                    stitches[header.name] = Stitch(
+                    stitches[filename] = Stitch(
                             sections={header.index: path},
                             count=0,
                             comp=header.comp)
 
                 # push the error for multi-last to later. assume the earlier last
                 # is correct.
-                st = stitches[header.name]
+                st = stitches[filename]
                 if header.last:
                     if not st.count:
                         st.count = header.index + 1
@@ -460,8 +456,8 @@ def stitch_files(paths, keep_sections):
     # bit hacked in but if the stitching cleared out any directories remove them.
     if not keep_sections:
         for path in dirpaths:
-            if not os.listdir(path):
-                os.rmdir(path)
+            if not any(path.iterdir()):
+                path.rmdir()
 
 
 
