@@ -1,7 +1,7 @@
 # stitch
 
-Simple commandline utility to split files into smaller files and then stitch them
-back up.
+Simple command-line utility to split files into smaller files and then stitch
+them back up.
 
 ``` py stitch.py -h ```
 
