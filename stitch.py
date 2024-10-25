@@ -29,14 +29,13 @@ class ask:
     _ctx = NONE
 
     def __call__(self, query):
-        if self._always_yes:
-            return True
-        if self._ctx == self.YES:
+        options = "(y/n/a)" if self._ctx else "(y/n)"
+        print(f"{query} {options}: ", end="")
+        if self._always_yes or self._ctx == self.YES:
+            print("y")
             return True
         while True:
-            options = "(y/n/a)" if self._ctx else "(y/n)"
-            user_input = input(f"{query} {options}: ")
-            user_input = user_input.strip().casefold()
+            user_input = input().strip().casefold()
             if user_input == "y":
                 return True
             if user_input == "n":
@@ -81,6 +80,18 @@ def esc(path):
 
 def pathlist(paths):
     return ", ".join(map(esc, paths))
+
+
+def unique_paths(paths):
+    seen = set()
+    unique = []
+    for path in paths:
+        abspath = path.resolve()
+        if abspath in seen:
+            continue
+        seen.add(abspath)
+        unique.append(path)
+    return unique
 
 
 def delete_paths(*paths):
@@ -400,14 +411,7 @@ def stitch_files(paths, keep_sections, keep_dirs):
 
 
     # ensure uniqueness.
-    unique_paths = set()
-    paths = []
-    for path in allpaths:
-        abspath = path.resolve()
-        if abspath in unique_paths:
-            continue
-        unique_paths.add(abspath)
-        paths.append(path)
+    paths = unique_paths(allpaths)
 
 
     # Collate all the stitches and their section files.
@@ -562,14 +566,22 @@ def main():
                 "current directory.")
 
     parser.add_argument("files", type=str, nargs="*", metavar="PATH",
-            help="path(s) for file(s) to stitch/split. when stitching, if a "
-                "path is a directory it will be searched for section files.")
+            help="Path(s) for file(s) to stitch/split. These are treated as "
+                "globs unless '--no-glob' is given. When splitting, directories "
+                "will not be globbed. When stitching, directories will be "
+                "searched for section files.")
 
     parser.add_argument("-y", "--yes", action="store_true",
             help="automatically say yes to prompts")
 
     parser.add_argument("-s", "--split", action="store_true",
             help="split (instead of stitch) each of the given file(s)")
+
+    parser.add_argument("--no-glob", action="store_true",
+            help="do not treat paths as globs")
+
+    parser.add_argument("--empty-glob", action="store_true",
+            help="silently ignore empty globs")
 
 
     group_stitch = parser.add_argument_group("when stitching")
@@ -634,13 +646,36 @@ def main():
         error(f"cannot encode any data without at-least {Header.SIZE + 1} byte "
                 "sections")
 
+
+    # Handle globbing.
+    if not args.no_glob:
+        paths = []
+        for path in args.files:
+            matching = list(Path(".").glob(path))
+            # if splitting, only match files.
+            if args.split:
+                matching = [p for p in matching if p.is_file()]
+            if not matching:
+                if args.empty_glob:
+                    continue
+                if not ask(f"glob {esc(path)} matches nothing, ignore?"):
+                    error(f"glob matched nothing: {esc(path)}")
+            paths.extend(matching)
+    else:
+        paths = args.files
+
+    # remove duplicate paths. note this is mostly done to ensure consistency
+    # between glob and no glob.
+    paths = unique_paths(paths)
+
+
     # Do the thing.
     if args.split:
-        for path in args.files:
+        for path in paths:
             split_file(path, size=args.size, nest=args.nest, there=args.there,
                     compress=not args.fast, delete_original=args.replace)
     else:
-        stitch_files(args.files, keep_sections=args.keep_sections,
+        stitch_files(paths, keep_sections=args.keep_sections,
                 keep_dirs=args.keep_dirs)
 
 
