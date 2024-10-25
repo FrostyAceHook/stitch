@@ -8,31 +8,79 @@ from pathlib import Path
 
 
 
-def ask(query):
-    if getattr(ask, "always_yes", False):
-        return True
-    while True:
-        user_input = input(f"{query} (y/n/a): ")
-        user_input = user_input.strip().casefold()
-        if user_input == "y":
+# Turns the given class into a singleton, instantiating it once.
+def singleton(cls):
+    instance = cls()
+    def throw(*args, **kwargs):
+        msg = f"cannot create another instance of singleton '{cls.__name__}'"
+        raise TypeError(msg)
+    cls.__new__ = throw
+    return instance
+
+
+
+# Queries the user for a yes or no response.
+@singleton
+class ask:
+    _always_yes = False
+    NONE = 0 # not in a context.
+    NO = 1 # in a context, without always saying yes.
+    YES = 2 # in a context, always saying yes.
+    _ctx = NONE
+
+    def __call__(self, query):
+        if self._always_yes:
             return True
-        if user_input == "n":
-            return False
-        if user_input == "a":
-            setattr(ask, "always_yes", True)
+        if self._ctx == self.YES:
             return True
+        while True:
+            options = "(y/n/a)" if self._ctx else "(y/n)"
+            user_input = input(f"{query} {options}: ")
+            user_input = user_input.strip().casefold()
+            if user_input == "y":
+                return True
+            if user_input == "n":
+                return False
+            if self._ctx and user_input == "a":
+                self._ctx = self.YES
+                return True
+
+    def always_yes(self):
+        self._always_yes = True
+
+    def __enter__(self):
+        if self._ctx:
+            raise Exception("already in 'ask' context")
+        self._ctx = self.NO
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if not self._ctx:
+            raise Exception("not in 'ask' context")
+        self._ctx = self.NONE
 
 
 
+class StitchError(Exception):
+    pass
 def error(msg):
-    sys.stderr.write(f"stitch: error: {msg}\n")
-    sys.exit(3)
+    raise StitchError(msg)
 
 
 
-def esc(s, /):
-    return "'" + str(s).replace("'", "''") + "'"
+def esc(path):
+    s = str(path)
+    quote = "'"
+    if "'" in s:
+        if "\"" in s:
+            s = s.replace("\\", "\\\\")
+            s = s.replace("\"", "\\\"")
+            s = s.replace("'", "\\'")
+        else:
+            quote = "\""
+    return quote + s + quote
 
+def pathlist(paths):
+    return ", ".join(map(esc, paths))
 
 
 def delete_paths(*paths):
@@ -50,11 +98,30 @@ def delete_paths(*paths):
         error(f"failed to delete paths:{ex}")
 
 
-def open_for_write(path):
-    if path.exists():
-        if not ask(f"file {esc(path)} already exists, overwrite?"):
-            error(f"file already exists at: {esc(path)}")
+def ensure_empty(path):
+    if path.is_file():
+        if not ask(f"file exists at {esc(path)}, overwrite?"):
+            return False
         delete_paths(path)
+    elif path.is_dir():
+        if not ask(f"directory exists at {esc(path)}, overwrite?"):
+            return False
+        delete_paths(path)
+    return True
+
+
+def create_empty_dir(path):
+    # if it already exists and is empty, great success.
+    if path.is_dir() and not any(path.iterdir()):
+        return
+    if not ensure_empty(path):
+        error(f"cannot create directory at: {esc(path)}")
+    path.mkdir()
+
+
+def open_for_write(path):
+    if not ensure_empty(path):
+        error(f"cannot create file at: {esc(path)}")
     return path.open("wb")
 
 
@@ -67,37 +134,20 @@ NO_EXISTE = NoExiste()
 
 def open_for_read(path, ignorable=True, askable=True):
     fine = True
-    ignore = False
+    ignore = ignorable
     if not path.exists():
         fine = False
-        if ignorable:
-            if askable:
-                ignore = ask(f"file {esc(path)} doesn't exist, ignore?")
-            else:
-                ignore = True
+        if ignorable and askable:
+            ignore = ask(f"file {esc(path)} doesn't exist, ignore?")
     elif not path.is_file():
         fine = False
-        if ignorable:
-            if askable:
-                ignore = ask(f"path {esc(path)} is not a file, ignore?")
-            else:
-                ignore = True
+        if ignorable and askable:
+            ignore = ask(f"path {esc(path)} is not a file, ignore?")
     if not fine:
         if ignore:
             return NO_EXISTE
         error(f"file doesn't exist at: {esc(path)}")
     return path.open("rb")
-
-
-def create_empty_dir(path):
-    # if it already exists and is empty, great success.
-    if path.is_dir() and not any(path.iterdir()):
-        return
-    if path.exists():
-        if not ask(f"directory {esc(path)} already exists, overwrite?"):
-            error(f"directory already exists at: {esc(path)}")
-        shutil.rmtree(path)
-    path.mkdir()
 
 
 
@@ -226,7 +276,7 @@ def dechunkify(file, decompress, get_path):
 
 
 
-def split_file(path, section_size, nest, compress, delete_original):
+def split_file(path, size, nest, there, compress, delete_original):
     path = Path(path)
 
     filename = path.name
@@ -234,37 +284,42 @@ def split_file(path, section_size, nest, compress, delete_original):
     filename = filename.replace("/", "")
     filename = filename.replace("\\", "")
     filename = filename.replace(":", "") # or this funky guy.
+    filename = filename.replace("*", "") # or this funkier guy.
     if not filename:
         filename = "file"
 
     stem = path.stem.replace(" ", "_")
-    nameof = lambda i: path.with_name(f"{stem}_{i}{EXT}")
+    stem = path.stem.replace("*", "_")
+    stem = path.stem.replace(":", "_")
+    makepath = path.with_name if (there) else Path
+    nameof = lambda i: makepath(f"{stem}_{i}{EXT}")
 
     if nest:
         # Create a directory to hold them all.
-        dirpath = Path(f"{stem}_sections")
+        dirpath = makepath(f"{stem}_sections")
         create_empty_dir(dirpath)
-        nnameof = nameof
-        nameof = lambda i: dirpath / nnameof(i)
+        nameof = lambda i: dirpath / f"{stem}_{i}{EXT}"
     else:
         # Otherwise, check that no sections files already exist for this file.
-        matching = []
-        for p in Path(".").iterdir():
+        def matching_section_file(p):
+            if not p.is_file():
+                return False
+            if p.suffix != EXT:
+                return False
             try:
-                if p.suffix == EXT:
-                    with open_for_read(p, askable=False) as file:
-                        if file is NO_EXISTE:
-                            continue
-                        buf = file.read(Header.SIZE)
-                        header = Header.read(buf)
-                        if header.name == filename:
-                            matching.append(p)
+                with p.open("rb") as file:
+                    buf = file.read(Header.SIZE)
+                header = Header.read(buf)
+                return header.name == filename
             except Exception:
-                pass
+                return False
+        parent = path.parent if (there) else Path(".")
+        matching = [p for p in parent.iterdir() if matching_section_file(p)]
         if matching:
             if not ask(f"section files already exist for {esc(path)}, "
                     "overwrite?"):
-                error(f"section files already exist for: {esc(path)}")
+                error(f"section files already exist for: {esc(path)}, at: "
+                        + pathlist(matching))
             delete_paths(*matching)
 
     index = 0
@@ -273,18 +328,18 @@ def split_file(path, section_size, nest, compress, delete_original):
     def process(chunk, last):
         nonlocal index
 
-        # print the next one now lmao.
-        if not last:
-            print(f"  {esc(nameof(index + 1))}")
-
         this = nameof(index)
         header = Header(name=filename, index=index, comp=compress, last=last)
-        try:
-            with open_for_write(this) as file:
+        with open_for_write(this) as file:
+            try:
+                # print the next one now, but after a possible query of replace.
+                if not last:
+                    print(f"  {esc(nameof(index + 1))}")
                 file.write(header.write())
                 file.write(chunk)
-        finally:
-            section_paths.append(this)
+            finally:
+                # track it to delete if a write fails/keyboard interrupt.
+                section_paths.append(this)
         index += 1
 
     print(f"Splitting {esc(path)} into:")
@@ -293,7 +348,8 @@ def split_file(path, section_size, nest, compress, delete_original):
             if file is not NO_EXISTE:
                 # dodgy print re-order to not stall while writing.
                 print(f"  {esc(nameof(0))}")
-                chunkify(file, compress, section_size - Header.SIZE, process)
+                with ask: # context for overwriting existing files.
+                    chunkify(file, compress, size - Header.SIZE, process)
     except: # mostly for keyboard interrupt
         if nest:
             delete_paths(dirname)
@@ -313,27 +369,35 @@ def stitch_files(paths, keep_sections, keep_dirs):
         paths = [Path(x) for x in paths]
         implicit = False
 
+    # unpack directories into the subpaths.
     allpaths = []
     dirpaths = []
-    for path in paths:
+
+    def unpack(path):
+        if not path.exists():
+            if not ask(f"path {esc(path)} doesn't exist, ignore?"):
+                error(f"path doesn't exist at: {esc(path)}")
+            return
+
         if not path.is_dir():
             allpaths.append(path)
+            return
 
-        subpaths = []
-        for p in path.iterdir():
-            if p.is_file() and p.suffix == EXT:
-                subpaths.append(p)
+        subpaths = [p for p in path.iterdir() if p.is_file() and p.suffix == EXT]
         if implicit:
             allpaths.extend(subpaths)
-            continue
-        # warn about empty directories (except for an implicit '.')
-        if not subpaths:
-            if not ask(f"directory {esc(path)} contains no section files, "
-                    "ignore?"):
-                error(f"no sections in directory: {esc(path)}")
-        else:
+            return
+        if subpaths:
             allpaths.extend(subpaths)
             dirpaths.append(path)
+            return
+        if not ask(f"directory {esc(path)} contains no section files, ignore?"):
+            error(f"no sections in directory: {esc(path)}")
+
+    with ask: # context for skipping bad paths.
+        for path in paths:
+            unpack(path)
+
 
     # ensure uniqueness.
     unique_paths = set()
@@ -346,85 +410,86 @@ def stitch_files(paths, keep_sections, keep_dirs):
         paths.append(path)
 
 
-    # First create a mapping of original filename to a dict of the paths which
-    # hold each index.
-    # filename -> Stitch
+    # Collate all the stitches and their section files.
     @dataclass
     class Stitch:
         sections: dict # index -> path
         count: int
         comp: bool
+    # filename -> Stitch
     stitches = {}
 
-    for path in paths:
-        with open_for_read(path) as file:
-            if file is NO_EXISTE:
-                continue
-            buf = file.read(Header.SIZE)
-            try:
-                header = Header.read(buf)
-                filename = Path(header.name)
+    def register(file):
+        if file is NO_EXISTE:
+            return
+        buf = file.read(Header.SIZE)
+        try:
+            header = Header.read(buf)
+            filename = Path(header.name)
 
-                if filename in stitches:
-                    st = stitches[filename]
-                    if header.comp != st.comp:
-                        raise Exception("inconsistent section compression")
-                    if header.index in st.sections:
-                        raise Exception("duplicate section file")
-                    st.sections[header.index] = path
-                else:
-                    stitches[filename] = Stitch(
-                            sections={header.index: path},
-                            count=0,
-                            comp=header.comp)
-
-                # push the error for multi-last to later. assume the earlier last
-                # is correct.
+            if filename in stitches:
                 st = stitches[filename]
-                if header.last:
-                    if not st.count:
-                        st.count = header.index + 1
-                    else:
-                        st.count = min(st.count, header.index + 1)
+                if header.comp != st.comp:
+                    raise Exception("inconsistent section compression")
+                if header.index in st.sections:
+                    raise Exception("duplicate section file")
+                st.sections[header.index] = path
+            else:
+                stitches[filename] = Stitch(
+                        sections={header.index: path},
+                        count=0,
+                        comp=header.comp)
 
-            except Exception as e:
-                if not ask(f"bad section file {esc(path)}, ignore?"):
-                    error(f"{str(e)}: {esc(path)}")
+            # push the error for multi-last to later. assume the earlier last is
+            # correct.
+            st = stitches[filename]
+            if header.last:
+                if not st.count:
+                    st.count = header.index + 1
+                else:
+                    st.count = min(st.count, header.index + 1)
+        except Exception as e:
+            if not ask(f"bad section file {esc(path)}, ignore?"):
+                error(f"{str(e)}: {esc(path)}")
 
-
-    # Check all the sections are there.
-    to_delete = set()
-    for filename, st in stitches.items():
+    def check(filename, stitch):
         # Check for extra files, i.e. files after last.
-        extra = []
-        if st.count > 0: # fallthrough to missing check.
-            for index, path in st.sections.items():
-                if index >= st.count:
-                    extra.append(path)
-        if extra:
-            if not ask(f"unneeded section files for {esc(filename)}, ignore?"):
-                error(f"unneeded sections for: {esc(filename)}, bad sections: "
-                        f"{', '.join(esc(x) for x in extra)}")
-            st.sections = {index: path for index, path in st.sections.items()
-                    if index < st.count}
+        extra = [path for index, path in stitch.sections.items()
+                if index >= stitch.count]
 
         # Check for missing files, i.e. gaps or never reaches last.
-        missing = False
-        if st.count == 0:
-            missing = True
-        for index in range(st.count):
-            if index not in st.sections:
-                missing = True
-                break
+        missing = not stitch.count or any(index not in stitch.sections.keys()
+                for index in range(stitch.count))
+
         if missing:
             if not ask(f"missing section files for {esc(filename)}, ignore?"):
                 error(f"missing sections for: {esc(filename)}, have sections: "
-                        f"{', '.join(esc(x) for x in st.sections.values())}")
-            to_delete.add(filename)
+                        + pathlist(stitch.sections.values()))
+            return False # we cannot complete this stitch.
+        if extra:
+            if not ask(f"unneeded section files for {esc(filename)}, ignore?"):
+                error(f"unneeded sections for: {esc(filename)}, bad sections: "
+                        + pathlist(extra))
+            stitch.sections = {index: path
+                    for index, path in stitch.sections.items()
+                    if index < stitch.count}
+            # stitch is still completeable.
 
-    for f in to_delete:
-        del stitches[f]
+        return True
 
+    with ask: # context to ignore bad sections.
+        # Register all sections.
+        for path in paths:
+            with open_for_read(path) as file:
+                register(file)
+
+        # Check all the sections are there.
+        to_delete = []
+        for filename, stitch in stitches.items():
+            if not check(filename, stitch):
+                to_delete.append(filename)
+        for f in to_delete:
+            del stitches[f]
 
 
     if not stitches:
@@ -446,6 +511,7 @@ def stitch_files(paths, keep_sections, keep_dirs):
             try:
                 dechunkify(file, st.comp, get_path)
             except:
+                # delete the half-baked file before exiting.
                 file.close()
                 delete_paths(filename)
                 raise
@@ -467,7 +533,7 @@ class StitchArgumentParser(argparse.ArgumentParser):
         if args is None:
             args = sys.argv[1:]
         # Allow for many different help requests.
-        if args and any(c in args for c in {"?", "-?", "/?", "/h", "/help"}):
+        if any(c in args for c in {"?", "-?", "/?", "/h", "/help"}):
             args = ["-h"]
         return super().parse_args(args, namespace)
 
@@ -481,8 +547,8 @@ def parse_size(arg):
             size *= units[unit]
             size = int(size)
             if size <= 0:
-                raise argparse.ArgumentTypeError(f"incorrect size: {arg}, size "
-                        "cannot be <= 0")
+                raise argparse.ArgumentTypeError(f"invalid size: {arg}, cannot "
+                        "be <= 0")
             return size
 
     raise argparse.ArgumentTypeError(f"incorrect size: {arg}, requires: "
@@ -493,12 +559,11 @@ def main():
     parser = StitchArgumentParser(prog="stitch",
             description="Stitch/split files from/to smaller files. If no "
                 "arguments are given, stitches all the section files in the "
-                "current directory. For section files (which can be stitched "
-                "back together) to be automatically recognised, they must have "
-                f"the extension '{EXT}'.")
+                "current directory.")
 
     parser.add_argument("files", type=str, nargs="*", metavar="PATH",
-            help="path(s) for file(s) to stitch/split")
+            help="path(s) for file(s) to stitch/split. when stitching, if a "
+                "path is a directory it will be searched for section files.")
 
     parser.add_argument("-y", "--yes", action="store_true",
             help="automatically say yes to prompts")
@@ -518,6 +583,9 @@ def main():
 
     group_split = parser.add_argument_group("when splitting")
 
+    group_split.add_argument("-x", "--size", type=parse_size, metavar="SIZE",
+            help="maximum size of the sections (defaults to 8MB)")
+
     group_split.add_argument("-f", "--fast", action="store_true",
             help="fast split (does no compression)")
 
@@ -527,21 +595,22 @@ def main():
     group_split.add_argument("-n", "--nest", action="store_true",
             help="output sections into separate directories")
 
-    group_split.add_argument("-x", "--size", type=parse_size, metavar="SIZE",
-            help="maximum size of the sections (defaults to 8MB)")
+    group_split.add_argument("-t", "--there", action="store_true",
+            help="output sections relative to the original file")
 
 
     args = parser.parse_args()
 
+
+    # ensure that splitting/sitching arguments are only given if the mode
+    # actually matches. typically this would be done by argparse with a subparser
+    # but i didnt wanna use them soo.
     illegal_group = group_stitch if args.split else group_split
-    illegals = []
-    for x in parser._actions:
-        if x.container is not illegal_group:
-            continue
-        if getattr(args, x.dest, False):
-            illegals.append(x.option_strings[-1])
+    # cheeky access of all options.
+    illegals = [x.option_strings for x in parser._actions
+            if x.container is illegal_group and getattr(args, x.dest)]
     if illegals:
-        illegals = [f"'{x}'" for x in illegals]
+        illegals = ["/".join(f"'{y}'" for y in x) for x in illegals]
         if len(illegals) <= 2:
             illegal = " or ".join(illegals)
         else:
@@ -551,12 +620,12 @@ def main():
                 f"{'splitting' if args.split else 'stitching'}")
 
 
-    if not args.files:
-        if args.split:
-            parser.error("specify at-least one file to split")
+    if not args.files and args.split:
+        parser.error("specify at-least one file to split")
+    # no files is fine for stitching (handled in `stitch_files`).
 
     if args.yes:
-        setattr(ask, "always_yes", True)
+        ask.always_yes()
 
     if not args.size:
         args.size = 8 << 20 # 8MB
@@ -568,7 +637,7 @@ def main():
     # Do the thing.
     if args.split:
         for path in args.files:
-            split_file(path, section_size=args.size, nest=args.nest,
+            split_file(path, size=args.size, nest=args.nest, there=args.there,
                     compress=not args.fast, delete_original=args.replace)
     else:
         stitch_files(args.files, keep_sections=args.keep_sections,
@@ -576,4 +645,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except StitchError as e:
+        sys.stderr.write(f"stitch: error: {e}\n")
+        sys.exit(1)
