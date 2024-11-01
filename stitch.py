@@ -82,6 +82,40 @@ def pathlist(paths):
     return ", ".join(map(esc, paths))
 
 
+def validate_filename(filename, only_valid_windows):
+    # https://stackoverflow.com/a/31976060
+
+    DFLT = "file"
+
+    # most control codes are valid on unix but i dont wanna create a file which
+    # is insanely difficult to remove/access.
+    replace = {chr(i) for i in range(32)}
+    replace |= {"/"}
+    if only_valid_windows:
+        replace |= {"<", ">", ":", "\"", "/", "\\", "|", "?", "*"}
+    for char in replace:
+        filename = filename.replace(char, "_")
+
+    if only_valid_windows:
+        if filename.endswith(" ") or filename.endswith("."):
+            filename = filename[:-1] + "_"
+
+    if only_valid_windows:
+        illegal_names = {"con", "prn", "aux", "nul"}
+        illegal_names |= {f"com{i}" for i in range(1, 10)}
+        illegal_names |= {f"lpt{i}" for i in range(1, 10)}
+        name = filename.split(".", 1)[0]
+        if name.casefold() in illegal_names:
+            return DFLT
+
+    # the so answer doesnt say this is invalid on windows but like. come on. how
+    # they supposed to create/open this file for stitching.
+    if filename in {".", ".."}:
+        return DFLT
+
+    return filename
+
+
 def unique_paths(paths):
     seen = set()
     unique = []
@@ -287,21 +321,19 @@ def dechunkify(file, decompress, get_path):
 
 
 
-def split_file(path, size, nest, there, compress, delete_original):
+def split_file(path, size, nest, there, compress, delete_original,
+        only_valid_windows, validate_filenames):
     path = Path(path)
 
+    # save the original filename to store in the sections.
     filename = path.name
-    # dont let dir separators slip in.
-    filename = filename.replace("/", "")
-    filename = filename.replace("\\", "")
-    filename = filename.replace(":", "") # or this funky guy.
-    filename = filename.replace("*", "") # or this funkier guy.
-    if not filename:
-        filename = "file"
-
+    # dont include spaces for output file paths.
     stem = path.stem.replace(" ", "_")
-    stem = path.stem.replace("*", "_")
-    stem = path.stem.replace(":", "_")
+
+    if validate_filenames:
+        filename = validate_filename(filename, only_valid_windows)
+        stem = validate_filename(stem, only_valid_windows)
+
     makepath = path.with_name if (there) else Path
     nameof = lambda i: makepath(f"{stem}_{i}{EXT}")
 
@@ -532,6 +564,16 @@ def stitch_files(paths, keep_sections, keep_dirs):
 
 
 
+class StitchHelpFormatter(argparse.HelpFormatter):
+    def add_usage(self, usage, actions, groups, prefix=None):
+        if usage is argparse.SUPPRESS:
+            return
+        # dont include actions which are only active in some modes.
+        universal = lambda a: not a.container.title.startswith("when ")
+        actions = filter(universal, actions)
+        args = usage, actions, groups, prefix
+        self._add_item(self._format_usage, args)
+
 class StitchArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         if args is None:
@@ -551,11 +593,10 @@ def parse_size(arg):
             size *= units[unit]
             size = int(size)
             if size <= 0:
-                raise argparse.ArgumentTypeError(f"invalid size: {arg}, cannot "
-                        "be <= 0")
+                raise argparse.ArgumentTypeError(f"size cannot be <= 0: {size}")
             return size
 
-    raise argparse.ArgumentTypeError(f"incorrect size: {arg}, requires: "
+    raise argparse.ArgumentTypeError(f"invalid size: {arg}, requires: "
             "<num> [k|m|g] B")
 
 
@@ -563,13 +604,15 @@ def main():
     parser = StitchArgumentParser(prog="stitch",
             description="Stitch/split files from/to smaller files. If no "
                 "arguments are given, stitches all the section files in the "
-                "current directory.")
+                "current directory.",
+            formatter_class=StitchHelpFormatter)
 
     parser.add_argument("files", type=str, nargs="*", metavar="PATH",
-            help="Path(s) for file(s) to stitch/split. These are treated as "
-                "globs unless '--no-glob' is given. When splitting, directories "
-                "will not be globbed. When stitching, directories will be "
-                "searched for section files.")
+            help="path(s) for file(s) to stitch/split. These are treated as "
+                "globs unless '--no-glob' is given."
+                " When stitching, directories will be searched for section "
+                    "files."
+                " When splitting, directories will not be globbed.")
 
     parser.add_argument("-y", "--yes", action="store_true",
             help="automatically say yes to prompts")
@@ -599,7 +642,7 @@ def main():
             help="maximum size of the sections (defaults to 8MB)")
 
     group_split.add_argument("-f", "--fast", action="store_true",
-            help="fast split (does no compression)")
+            help="faster split (does no compression)")
 
     group_split.add_argument("-r", "--replace", action="store_true",
             help="delete original file after splitting")
@@ -609,6 +652,12 @@ def main():
 
     group_split.add_argument("-t", "--there", action="store_true",
             help="output sections relative to the original file")
+
+    group_split.add_argument("--unix-filenames", action="store_true",
+            help="allow filenames that may be invalid on windows")
+
+    group_split.add_argument("--all-filenames", action="store_true",
+            help="disable filename validation")
 
 
     args = parser.parse_args()
@@ -628,8 +677,7 @@ def main():
         else:
             illegals[-1] = "or " + illegals[-1]
             illegal = ", ".join(illegals)
-        parser.error(f"cannot specify {illegal} when "
-                f"{'splitting' if args.split else 'stitching'}")
+        parser.error(f"cannot specify {illegal} {illegal_group.title}")
 
 
     if not args.files and args.split:
@@ -673,7 +721,9 @@ def main():
     if args.split:
         for path in paths:
             split_file(path, size=args.size, nest=args.nest, there=args.there,
-                    compress=not args.fast, delete_original=args.replace)
+                    compress=not args.fast, delete_original=args.replace,
+                    only_valid_windows=not args.unix_filenames,
+                    validate_filenames=not args.all_filenames)
     else:
         stitch_files(paths, keep_sections=args.keep_sections,
                 keep_dirs=args.keep_dirs)
