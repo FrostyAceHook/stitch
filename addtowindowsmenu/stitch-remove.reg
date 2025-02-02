@@ -1,0 +1,6 @@
+Windows Registry Editor Version 5.00
+
+[-HKEY_CLASSES_ROOT\*\shell\brStitchSplit]
+[-HKEY_CLASSES_ROOT\*\shell\brStitchSplitNest]
+[-HKEY_CLASSES_ROOT\*\shell\brStitchSplitReplace]
+[-HKEY_CLASSES_ROOT\Directory\Background\shell\brStitch]

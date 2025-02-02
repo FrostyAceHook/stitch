@@ -11,6 +11,7 @@
 # this program. If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
+import glob
 import shutil
 import struct
 import sys
@@ -206,6 +207,40 @@ def open_for_read(path, ignorable=True, askable=True):
         error(f"file doesn't exist at: {esc(path)}")
     return path.open("rb")
 
+
+FILES_ONLY = object()
+DIRS_ONLY = object()
+FILES_AND_DIRS = object()
+
+def search(pattern, find=FILES_ONLY, desc="files"):
+    if find is FILES_ONLY:
+        inc_files, inc_dirs = True, False
+    elif find is DIRS_ONLY:
+        inc_files, inc_dirs = False, True
+    elif find is FILES_AND_DIRS:
+        inc_files, inc_dirs = True, True
+    else:
+        assert False
+
+    pattern = str(pattern)
+    paths = glob.iglob(pattern, recursive=True, include_hidden=True)
+    paths = [Path(p) for p in paths]
+
+    def include(path):
+        # Check dirs.
+        if path.is_dir():
+            return inc_dirs
+        # Check files.
+        if not inc_files:
+            return False
+        return True
+    paths = [p for p in paths if include(p)]
+    paths = sorted(paths, key=lambda p: (len(p.parts), str(p)))
+
+    if not paths:
+        if not ask(f"path {esc(pattern)} matches no {desc}, ignore?"):
+            error(f"no matching {desc} for path: {esc(pattern)}")
+    return paths
 
 
 
@@ -651,7 +686,7 @@ def main():
     group_split = parser.add_argument_group("when splitting")
 
     group_split.add_argument("-x", "--size", type=parse_size, metavar="SIZE",
-            help="maximum size of the sections (defaults to 8MB)")
+            help="maximum size of the sections (defaults to 10MB)")
 
     group_split.add_argument("-f", "--fast", action="store_true",
             help="faster split (does no compression)")
@@ -692,15 +727,11 @@ def main():
         parser.error(f"cannot specify {illegal} {illegal_group.title}")
 
 
-    if not args.files and args.split:
-        parser.error("specify at-least one file to split")
-    # no files is fine for stitching (handled in `stitch_files`).
-
     if args.yes:
         ask.always_yes()
 
     if not args.size:
-        args.size = 8 << 20 # 8MB
+        args.size = 10 << 20 # 10MB
 
     if args.size <= Header.SIZE:
         error(f"cannot encode any data without at-least {Header.SIZE + 1} byte "
@@ -708,21 +739,19 @@ def main():
 
 
     # Handle globbing.
-    if not args.no_glob:
+    if args.no_glob:
+        paths = args.files
+    else:
         paths = []
         for path in args.files:
-            matching = list(Path(".").glob(path))
-            # if splitting, only match files.
-            if args.split:
-                matching = [p for p in matching if p.is_file()]
-            if not matching:
-                if args.empty_glob:
-                    continue
-                if not ask(f"glob {esc(path)} matches nothing, ignore?"):
-                    error(f"glob matched nothing: {esc(path)}")
-            paths.extend(matching)
-    else:
-        paths = args.files
+            # If splitting, only match files. Note that directory paths will be
+            # further expanded in `stitch_files`.
+            find = FILES_ONLY if (args.split) else FILES_AND_DIRS
+            paths.extend(search(path, find=find))
+
+    if args.split and not paths:
+        error("specify at-least one file to split")
+    # no files is fine for stitching (handled in `stitch_files`).
 
     # remove duplicate paths. note this is mostly done to ensure consistency
     # between glob and no glob.

@@ -1,0 +1,25 @@
+Windows Registry Editor Version 5.00
+
+; click on file
+[HKEY_CLASSES_ROOT\*\shell\brStitchSplit]
+@="br: Split File"
+[HKEY_CLASSES_ROOT\*\shell\brStitchSplit\command]
+@="py \"C:\\Program Files\\br_stitch\\stitch.py\" -sf \"%1\""
+
+; also click on file
+[HKEY_CLASSES_ROOT\*\shell\brStitchSplitNest]
+@="br: Split File (Nested)"
+[HKEY_CLASSES_ROOT\*\shell\brStitchSplitNest\command]
+@="py \"C:\\Program Files\\br_stitch\\stitch.py\" -sfn \"%1\""
+
+; also also click on file
+[HKEY_CLASSES_ROOT\*\shell\brStitchSplitReplace]
+@="br: Split File (Replace)"
+[HKEY_CLASSES_ROOT\*\shell\brStitchSplitReplace\command]
+@="py \"C:\\Program Files\\br_stitch\\stitch.py\" -sfr \"%1\""
+
+; click on background
+[HKEY_CLASSES_ROOT\Directory\Background\shell\brStitch]
+@="br: Stitch All"
+[HKEY_CLASSES_ROOT\Directory\Background\shell\brStitch\command]
+@="py \"C:\\Program Files\\br_stitch\\stitch.py\" \"%V\""
